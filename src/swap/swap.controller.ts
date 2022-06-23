@@ -1,6 +1,12 @@
 import { Controller, Post, Body } from '@nestjs/common';
 import { ApiOkResponse } from '@nestjs/swagger';
-import { SetPoolIdDto, SetPrivateKeyDto, SwapDto } from './dto/swap.dto';
+import {
+  ApproveTokensDto,
+  BatchSwapDto,
+  SetPoolIdDto,
+  SetPrivateKeyDto,
+  SwapDto,
+} from './dto/swap.dto';
 import { SwapService } from './swap.service';
 
 @Controller('swap')
@@ -11,8 +17,24 @@ export class SwapController {
   @ApiOkResponse({
     description: 'execute single swap',
   })
-  async swap(@Body() swapDto: SwapDto) {
-    return await this.swapService.swap(swapDto);
+  async singleSwap(@Body() swapDto: SwapDto) {
+    return await this.swapService.singleSwap(swapDto);
+  }
+
+  @Post('batch-swap')
+  @ApiOkResponse({
+    description: 'execute batch swap',
+  })
+  async batchSwap(@Body() batchSwapDto: BatchSwapDto) {
+    return await this.swapService.batchSwap(batchSwapDto);
+  }
+
+  @Post('approve-tokens')
+  @ApiOkResponse({
+    description: 'approve tokens to vault',
+  })
+  async approveTokens(@Body() approveTokensDto: ApproveTokensDto) {
+    return await this.swapService.approveTokens(approveTokensDto);
   }
 
   @Post('set-private-key')

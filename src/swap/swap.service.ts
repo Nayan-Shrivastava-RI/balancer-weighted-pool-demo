@@ -1,5 +1,5 @@
 import { Injectable, NotAcceptableException } from '@nestjs/common';
-import { SwapDto } from './dto/swap.dto';
+import { ApproveTokensDto, BatchSwapDto, SwapDto } from './dto/swap.dto';
 import Web3 from 'web3';
 import { ConfigService } from '@nestjs/config';
 import { vaultContractABI } from 'src/swap/abi/vault-abi';
@@ -16,19 +16,19 @@ export class SwapService {
   private blockExplorerUrl = 'https://kovan.etherscan.io/';
   private chainId = 42;
   private gasPrice = 2;
+  private vaultAddress: string;
   constructor(private configService: ConfigService) {
-    this.setPoolId(this.configService.get('POOL_ID'));
-    this.setPrivateKey(this.configService.get('PRIVATE_KEY'));
     const httpProvider = new Web3.providers.HttpProvider(
       this.configService.get('NETWORK_URL'),
     );
-
+    this.vaultAddress = this.configService.get('VAULT_ADDRESS');
     this.web3 = new Web3(httpProvider);
     this.vaultContract = new this.web3.eth.Contract(
       vaultContractABI,
-      this.configService.get('VAULT_ADDRESS'),
+      this.vaultAddress,
     );
-
+    this.setPoolId(this.configService.get('POOL_ID'));
+    this.setPrivateKey(this.configService.get('PRIVATE_KEY'));
     this.accountAddress = this.web3.eth.accounts.privateKeyToAccount(
       this.privateKey,
     ).address;
@@ -51,7 +51,7 @@ export class SwapService {
     return decimals;
   }
 
-  async swap(swapDto: SwapDto) {
+  async singleSwap(swapDto: SwapDto) {
     if (!this.poolId) {
       throw new NotAcceptableException('PoolId not set');
     }
@@ -110,10 +110,123 @@ export class SwapService {
       token_limit,
       swapDto.deadline.toString(),
     );
-    await this.buildAndSend(
-      singleSwapFunction,
-      this.configService.get('VAULT_ADDRESS'),
+    return await this.buildAndSend(singleSwapFunction, this.vaultAddress);
+  }
+
+  // pool_WETH_USDC =
+  //   '0x3a19030ed746bd1c3f2b0f996ff9479af04c5f0a000200000000000000000004';
+  // pool_BAL_WETH =
+  //   '0x61d5dc44849c9c87b0856a2a311536205c96c7fd000200000000000000000000';
+
+  // // Token addresses (checksum format)
+  // token_BAL = '0x41286Bb1D3E870f3F750eB7E1C25d7E48c8A1Ac7'.toLowerCase();
+  // token_USDC = '0xc2569dd7d0fd715B054fBf16E75B001E5c0C1115'.toLowerCase();
+  // token_WETH = '0xdFCeA9088c8A88A76FF74892C1457C17dfeef9C1'.toLowerCase();
+
+  // swap_steps = [
+  //   {
+  //     poolId: batchSwapDto.step,
+  //     assetIn: token_USDC,
+  //     assetOut: token_WETH,
+  //     amount: 100,
+  //   },
+  //   {
+  //     poolId: pool_BAL_WETH,
+  //     assetIn: token_WETH,
+  //     assetOut: token_BAL,
+  //     amount: 0,
+  //   },
+  // ];
+
+  async batchSwap(batchSwapDto: BatchSwapDto) {
+    if (!this.poolId) {
+      throw new NotAcceptableException('PoolId not set');
+    }
+
+    if (!this.privateKey) {
+      throw new NotAcceptableException('privateKey not set');
+    }
+    const swapKind = 0;
+
+    const fund_settings = {
+      sender: batchSwapDto.sender,
+      recipient: batchSwapDto.recipient,
+      fromInternalBalance: false,
+      toInternalBalance: false,
+    };
+
+    const tokenAddresses = batchSwapDto.tokenData.map((data) => data.address);
+    tokenAddresses.sort();
+    const tokenIndices = {};
+    for (let i = 0; i < tokenAddresses.length; i++) {
+      tokenIndices[tokenAddresses[i]] = i;
+    }
+
+    const swapStepsStruct = [];
+    for (const step of batchSwapDto.swapSteps) {
+      const swapStepStruct = {
+        poolId: step['poolId'],
+        assetInIndex: tokenIndices[step['assetIn']],
+        assetOutIndex: tokenIndices[step['assetOut']],
+        amount: (
+          step['amount'] *
+          Math.pow(
+            10,
+            Number(
+              batchSwapDto.tokenData.find(
+                (data) => data.address === step['assetIn'],
+              ).decimals,
+            ),
+          )
+        ).toString(),
+        userData: '0x',
+      };
+      swapStepsStruct.push(swapStepStruct);
+    }
+    const fundStruct = {
+      sender: this.web3.utils.toChecksumAddress(fund_settings['sender']),
+      fromInternalBalance: fund_settings['fromInternalBalance'],
+      recipient: this.web3.utils.toChecksumAddress(fund_settings['recipient']),
+      toInternalBalance: fund_settings['toInternalBalance'],
+    };
+
+    const tokenLimits = [];
+    const checksumTokens = [];
+    for (const token of tokenAddresses) {
+      tokenLimits.push(
+        (
+          Number(
+            batchSwapDto.tokenData.find((data) => data.address === token).limit,
+          ) *
+          Math.pow(
+            10,
+            Number(
+              batchSwapDto.tokenData.find((data) => data.address === token)
+                .decimals,
+            ),
+          )
+        ).toString(),
+      );
+      checksumTokens.push(this.web3.utils.toChecksumAddress(token));
+    }
+    console.log(
+      swapKind,
+      swapStepsStruct,
+      checksumTokens,
+      fundStruct,
+      tokenLimits,
+      batchSwapDto.deadline.toString(),
     );
+    const batchSwapFunction = this.vaultContract.methods.batchSwap(
+      swapKind,
+      swapStepsStruct,
+      checksumTokens,
+      fundStruct,
+      tokenLimits,
+      batchSwapDto.deadline.toString(),
+    );
+
+    return await this.buildAndSend(batchSwapFunction, this.vaultAddress);
   }
 
   private async buildAndSend(txFunction: any, to: string) {
@@ -146,5 +259,20 @@ export class SwapService {
       );
     console.log(receipt);
     return receipt;
+  }
+
+  async approveTokens(approveTokensDto: ApproveTokensDto) {
+    const tokenContract = new this.web3.eth.Contract(
+      ERC20ABI,
+      approveTokensDto.tokenAddress,
+    );
+    const approveTokenFunction = tokenContract.methods.approve(
+      this.vaultAddress,
+      approveTokensDto.amount.toFixed(0),
+    );
+    return await this.buildAndSend(
+      approveTokenFunction,
+      approveTokensDto.tokenAddress,
+    );
   }
 }
